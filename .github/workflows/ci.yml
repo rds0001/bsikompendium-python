@@ -22,7 +22,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python -c "from pathlib import Path; Path('arbeit/tmp').mkdir(parents=True, exist_ok=True)"
-      - run: python -m pip install build setuptools wheel twine pytest ruff==0.13.3
+      - run: python -m pip install build "setuptools>=69" wheel twine pytest ruff==0.13.3
       - run: ruff check src tests
       - run: python -m build --no-isolation
       - run: python -m twine check --strict dist/*
