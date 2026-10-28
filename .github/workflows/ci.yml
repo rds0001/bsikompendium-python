@@ -1,0 +1,29 @@
+name: Python package
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ['3.10', '3.14']
+    env:
+      PIP_CACHE_DIR: ${{ github.workspace }}/arbeit/tmp/pip-cache
+      TMPDIR: ${{ github.workspace }}/arbeit/tmp
+      TEMP: ${{ github.workspace }}/arbeit/tmp
+      TMP: ${{ github.workspace }}/arbeit/tmp
+      RUFF_CACHE_DIR: ${{ github.workspace }}/arbeit/tmp/ruff
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -c "from pathlib import Path; Path('arbeit/tmp').mkdir(parents=True, exist_ok=True)"
+      - run: python -m pip install build setuptools wheel twine pytest ruff
+      - run: ruff check src tests
+      - run: python -m build --no-isolation
+      - run: python -m twine check --strict dist/*
+      - run: python -m pip install --no-index --find-links=dist bsikompendium
+      - run: python -m pytest tests -q -s --basetemp=arbeit/tmp/pytest -o cache_dir=arbeit/tmp/pytest-cache
