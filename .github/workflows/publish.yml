@@ -1,0 +1,136 @@
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pypi-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'rds0001/bsikompendium-python' && !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    env:
+      TMPDIR: ${{ github.workspace }}/arbeit/tmp
+      TMP: ${{ github.workspace }}/arbeit/tmp
+      TEMP: ${{ github.workspace }}/arbeit/tmp
+      PIP_CACHE_DIR: ${{ github.workspace }}/arbeit/tmp/pip-cache
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - run: mkdir -p arbeit/tmp/installed-check
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: '3.14'
+      - name: Require successful CI for this release commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&per_page=20" > arbeit/tmp/ci.json
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          runs = json.loads(Path('arbeit/tmp/ci.json').read_text())['workflow_runs']
+          assert any(r['head_sha'] == os.environ['GITHUB_SHA'] and
+                     r['conclusion'] == 'success' and r['head_branch'] == 'main'
+                     for r in runs), 'Release commit has no successful main-branch CI run'
+          PY
+      - name: Check fixed project name and release version
+        run: |
+          python - <<'PY'
+          import os, tomllib
+          from pathlib import Path
+          project = tomllib.loads(Path('pyproject.toml').read_text())['project']
+          assert project['name'] == 'bsikompendium'
+          assert os.environ['GITHUB_REF_NAME'] == 'v' + project['version']
+          PY
+      - name: Build distributions
+        run: |
+          python -m pip install build 'setuptools>=69' wheel twine pytest
+          python -m build --no-isolation
+          python -m twine check --strict dist/*
+      - name: Test fresh wheel and sdist installations
+        shell: bash
+        run: |
+          for kind in wheel sdist; do
+            venv="$GITHUB_WORKSPACE/arbeit/tmp/$kind-env"
+            python -m venv --system-site-packages "$venv"
+            if [ "$kind" = wheel ]; then
+              "$venv/bin/python" -m pip install --no-deps --no-index dist/*.whl
+            else
+              "$venv/bin/python" -m pip install --no-deps --no-index --no-build-isolation dist/*.tar.gz
+            fi
+            (
+              cd arbeit/tmp/installed-check
+              "$venv/bin/python" -c 'import bsikompendium, pathlib, sys; assert pathlib.Path(bsikompendium.__file__).resolve().is_relative_to(pathlib.Path(sys.prefix))'
+              "$venv/bin/python" -m pytest "$GITHUB_WORKSPACE/tests" -q -s --basetemp="$venv/pytest" -o "cache_dir=$venv/pytest-cache"
+              "$venv/bin/python" "$GITHUB_WORKSPACE/examples/individueller_pruefablauf.py" > "$venv/example.json"
+            )
+          done
+      - name: Verify archive boundaries
+        run: |
+          python - <<'PY'
+          import tarfile, zipfile
+          from pathlib import Path
+          files = list(Path('dist').iterdir())
+          assert len(files) == 2
+          for path in files:
+              with (zipfile.ZipFile(path) if path.suffix == '.whl' else tarfile.open(path)) as archive:
+                  names = archive.namelist() if path.suffix == '.whl' else archive.getnames()
+              assert not any(set(Path(n).parts) & {'arbeit', 'Regularien', '.git', '__pycache__'} for n in names)
+              assert any(n.endswith('fachregeln.json.gz') for n in names)
+              assert any(n.endswith('methodik.json.gz') for n in names)
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: python-package-distributions
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/bsikompendium/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: python-package-distributions
+          path: dist
+      - name: Publish bsikompendium with Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+
+  release-assets:
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: python-package-distributions
+          path: dist
+      - name: Attach published files and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          (cd dist && sha256sum *.whl *.tar.gz > SHA256SUMS)
+          gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY"
